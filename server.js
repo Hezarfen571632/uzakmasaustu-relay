@@ -38,6 +38,12 @@ wss.on("connection", (ws) => {
       // Client registers with its connection ID
       case "Register": {
         clientId = msg.id;
+        // If an old connection exists for this ID, close it cleanly
+        const existing = clients.get(clientId);
+        if (existing && existing.ws !== ws && existing.ws.readyState === WebSocket.OPEN) {
+          existing.ws._replaced = true; // Mark as replaced so close handler skips cleanup
+          existing.ws.close();
+        }
         clients.set(clientId, { ws, hostname: msg.hostname || "Unknown" });
         ws.send(JSON.stringify({ type: "Registered", id: clientId }));
         console.log(`[+] ${clientId} registered (${clients.size} online)`);
@@ -76,13 +82,15 @@ wss.on("connection", (ws) => {
         break;
       }
 
-      // Any other message → forward to paired partner
+      // Any other message → forward to paired partner as TEXT
       default: {
         const partnerId = pairs.get(clientId);
         if (partnerId) {
           const partner = clients.get(partnerId);
           if (partner && partner.ws.readyState === WebSocket.OPEN) {
-            partner.ws.send(raw);
+            // CRITICAL: Convert Buffer to string so it's sent as text frame
+            // Rust client only handles Message::Text, not Message::Binary
+            partner.ws.send(raw.toString());
           }
         }
         break;
@@ -92,6 +100,12 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     if (clientId) {
+      // Skip cleanup if this WS was replaced by a newer connection
+      if (ws._replaced) return;
+      // Only cleanup if this WS is still the registered one
+      const current = clients.get(clientId);
+      if (current && current.ws !== ws) return;
+
       // Notify partner
       const partnerId = pairs.get(clientId);
       if (partnerId) {
